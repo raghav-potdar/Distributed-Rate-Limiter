@@ -125,14 +125,28 @@ for bucket in $(echo "${!BUCKETS[@]}" | tr ' ' '\n' | sort -n); do
 done
 echo ""
 
-# atomicity check
+# Atomicity check
+# The upper bound on allowed requests is capacity + tokens that could have
+# refilled during the wall-clock time of the test.  A true race condition
+# would allow far more than this ceiling (e.g. every thread reads the same
+# non-zero token count before any write commits).
 print_header "Atomicity check"
-if (( ALLOWED <= CAPACITY )); then
-  echo "  PASS — allowed ($ALLOWED) ≤ capacity ($CAPACITY)"
+REFILL_DURING_TEST=$(echo "scale=0; $WALL_MS * $REFILL_RATE / 1000" | bc)
+MAX_ALLOWED=$(( CAPACITY + REFILL_DURING_TEST ))
+EXCESS=$(( ALLOWED - MAX_ALLOWED ))
+echo "  Capacity              : $CAPACITY tokens"
+echo "  Refill during test    : ~$REFILL_DURING_TEST tokens  (${WALL_MS}ms × ${REFILL_RATE}/s)"
+echo "  Max theoretically OK  : $MAX_ALLOWED tokens"
+echo "  Actually allowed      : $ALLOWED tokens"
+echo ""
+if (( ALLOWED <= MAX_ALLOWED )); then
+  echo "  PASS — allowed ($ALLOWED) ≤ max expected ($MAX_ALLOWED)"
   echo "         Lua EVAL atomicity is holding correctly."
 else
-  echo "  FAIL — allowed ($ALLOWED) > capacity ($CAPACITY)"
-  echo "         Race condition detected!"
+  echo "  FAIL — allowed ($ALLOWED) exceeds max expected ($MAX_ALLOWED) by $EXCESS"
+  echo "         Possible race condition — investigate Lua script."
   exit 2
 fi
+echo ""
+echo "  Tip: use refillRate=1 to minimize refill noise in the atomicity check."
 echo ""
