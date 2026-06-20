@@ -31,10 +31,13 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
         response.setHeader("X-RateLimit-Limit", String.valueOf(config.capacity()));
         response.setHeader("X-RateLimit-Remaining", String.valueOf(result.remaining()));
-        // Seconds until bucket is fully replenished from current level
         long resetSeconds = (long) Math.ceil(
                 (config.capacity() - result.remaining()) / (double) config.refillRate());
         response.setHeader("X-RateLimit-Reset", String.valueOf(resetSeconds));
+
+        if (result.degraded()) {
+            response.setHeader("X-RateLimit-Degraded", "true");
+        }
 
         if (result.allowed()) {
             return true;

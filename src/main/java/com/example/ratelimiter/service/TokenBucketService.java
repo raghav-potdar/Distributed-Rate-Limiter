@@ -19,37 +19,52 @@ public class TokenBucketService {
     private final DefaultRedisScript<List> script;
     private final RateLimiterProperties properties;
     private final ConcurrentHashMap<String, BucketConfig> overrides = new ConcurrentHashMap<>();
+    private final CircuitBreaker circuitBreaker;
 
     public record BucketConfig(int capacity, int refillRate) {}
 
     public TokenBucketService(StringRedisTemplate redisTemplate, RateLimiterProperties properties) {
         this.redisTemplate = redisTemplate;
-        this.properties = properties;
+        this.properties    = properties;
         script = new DefaultRedisScript<>();
         script.setLocation(new ClassPathResource("scripts/token_bucket.lua"));
         script.setResultType(List.class);
+
+        RateLimiterProperties.CircuitBreakerConfig cb = properties.getCircuitBreaker();
+        this.circuitBreaker = new CircuitBreaker(cb.getFailureThreshold(), cb.getResetTimeoutMs());
     }
 
     @SuppressWarnings("unchecked")
     public RateLimitResult tryConsume(String key, int capacity, int refillRate) {
-        long now = System.currentTimeMillis();
-        List<Long> result = (List<Long>) redisTemplate.execute(
-                script,
-                List.of(REDIS_KEY_PREFIX + key),
-                String.valueOf(capacity),
-                String.valueOf(refillRate),
-                String.valueOf(now)
-        );
-
-        if (result == null || result.isEmpty()) {
-            // Fail open: allow the request if Redis is unreachable
-            return new RateLimitResult(true, capacity - 1L, 0L);
+        if (!circuitBreaker.allowRequest()) {
+            return RateLimitResult.failOpen(capacity);
         }
 
-        boolean allowed = result.get(0) == 1L;
-        long remaining  = result.get(1);
-        long retryAfter = result.get(2);
-        return new RateLimitResult(allowed, remaining, retryAfter);
+        try {
+            long now = System.currentTimeMillis();
+            List<Long> result = (List<Long>) redisTemplate.execute(
+                    script,
+                    List.of(REDIS_KEY_PREFIX + key),
+                    String.valueOf(capacity),
+                    String.valueOf(refillRate),
+                    String.valueOf(now)
+            );
+
+            if (result == null || result.isEmpty()) {
+                circuitBreaker.recordFailure();
+                return RateLimitResult.failOpen(capacity);
+            }
+
+            circuitBreaker.recordSuccess();
+            boolean allowed = result.get(0) == 1L;
+            long remaining  = result.get(1);
+            long retryAfter = result.get(2);
+            return new RateLimitResult(allowed, remaining, retryAfter);
+
+        } catch (Exception e) {
+            circuitBreaker.recordFailure();
+            return RateLimitResult.failOpen(capacity);
+        }
     }
 
     public BucketConfig getConfig(String key) {
@@ -65,5 +80,9 @@ public class TokenBucketService {
 
     public Map<Object, Object> getBucketState(String key) {
         return redisTemplate.opsForHash().entries(REDIS_KEY_PREFIX + key);
+    }
+
+    public CircuitBreaker getCircuitBreaker() {
+        return circuitBreaker;
     }
 }

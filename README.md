@@ -37,6 +37,9 @@ rate-limiter:
   defaults:
     capacity: 100      # max tokens in a bucket
     refill-rate: 10    # tokens added per second
+  circuit-breaker:
+    failure-threshold: 5       # consecutive Redis failures before tripping OPEN
+    reset-timeout-ms: 30000    # ms to wait in OPEN before probing (HALF_OPEN)
 ```
 
 Per-key overrides can be set at runtime via `PUT /api/admin/limits/{key}`.
@@ -69,8 +72,20 @@ Retry-After:           1
 ### Admin endpoints
 
 ```
-GET /api/admin/limits/{key}
-PUT /api/admin/limits/{key}    body: {"capacity":50,"refillRate":5}
+GET  /api/admin/limits/{key}
+PUT  /api/admin/limits/{key}      body: {"capacity":50,"refillRate":5}
+GET  /api/admin/circuit-breaker
+```
+
+**200 OK** (circuit breaker state):
+```json
+{ "state": "CLOSED", "consecutiveFailures": 0, "openedAt": null }
+```
+
+**Degraded response** (circuit is OPEN — Redis is down, requests still allowed):
+```
+X-RateLimit-Degraded: true
+X-RateLimit-Remaining: 100
 ```
 
 ---
@@ -95,6 +110,38 @@ curl -s -X PUT http://localhost:8080/api/admin/limits/demo \
 
 # Inspect bucket state
 curl -s http://localhost:8080/api/admin/limits/demo | jq .
+```
+
+---
+
+## Circuit Breaker / Fail-Open
+
+If Redis becomes unreachable, the rate limiter **fails open** — requests are allowed through rather than failing — so a Redis outage never takes down the API.
+
+**State machine:**
+```
+CLOSED ──(5 consecutive failures)──► OPEN ──(30s timeout)──► HALF_OPEN
+  ▲                                                               │
+  └──────────────── probe succeeds ──────────────────────────────┘
+                    probe fails → back to OPEN
+```
+
+- **CLOSED** — normal operation; every request hits Redis
+- **OPEN** — Redis is down; Redis is bypassed, all requests allowed, `X-RateLimit-Degraded: true` header added
+- **HALF_OPEN** — after 30s one probe request is let through; success closes the circuit, failure reopens it
+
+**Tunable via `application.yml`:**
+```yaml
+rate-limiter:
+  circuit-breaker:
+    failure-threshold: 5      # trips OPEN after N consecutive failures
+    reset-timeout-ms: 30000   # waits this long before probing
+```
+
+**Check state at runtime:**
+```bash
+curl http://localhost:8080/api/admin/circuit-breaker
+# {"state":"OPEN","consecutiveFailures":5,"openedAt":1750000000000}
 ```
 
 ---
@@ -219,7 +266,8 @@ rate-limiter/
 │   │   ├── RateLimiterConfig.java       # WebMvcConfigurer, @EnableConfigurationProperties
 │   │   └── RateLimiterProperties.java   # @ConfigurationProperties("rate-limiter")
 │   ├── service/
-│   │   ├── RateLimitResult.java         # record: allowed, remaining, retryAfterSeconds
+│   │   ├── RateLimitResult.java         # record: allowed, remaining, retryAfterSeconds, degraded
+│   │   ├── CircuitBreaker.java          # CLOSED/OPEN/HALF_OPEN state machine (no external lib)
 │   │   └── TokenBucketService.java      # executes Lua script, manages per-key overrides
 │   ├── filter/
 │   │   └── RateLimitInterceptor.java    # HandlerInterceptor for /api/resource
@@ -231,7 +279,8 @@ rate-limiter/
 │   └── scripts/token_bucket.lua
 ├── src/test/java/com/example/ratelimiter/
 │   ├── TokenBucketServiceTest.java      # Testcontainers: allow/reject/refill
-│   └── ConcurrencyTest.java             # 200 threads → exactly 50 allowed
+│   ├── ConcurrencyTest.java             # 200 threads → exactly 50 allowed
+│   └── CircuitBreakerTest.java          # unit tests: all state transitions, no Redis
 ├── src/test/scripts/
 │   └── stress_test.sh                   # bash concurrent load test + atomicity check
 ├── docker-compose.yml

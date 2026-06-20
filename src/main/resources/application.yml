@@ -8,3 +8,6 @@ rate-limiter:
   defaults:
     capacity: 100
     refill-rate: 10
+  circuit-breaker:
+    failure-threshold: 5      # consecutive Redis failures before tripping OPEN
+    reset-timeout-ms: 30000   # ms to wait in OPEN before sending a probe (HALF_OPEN)

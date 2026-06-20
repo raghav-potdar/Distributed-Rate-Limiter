@@ -1,5 +1,6 @@
 package com.example.ratelimiter.controller;
 
+import com.example.ratelimiter.service.CircuitBreaker;
 import com.example.ratelimiter.service.TokenBucketService;
 import com.example.ratelimiter.service.TokenBucketService.BucketConfig;
 import org.springframework.http.ResponseEntity;
@@ -9,7 +10,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/admin/limits")
+@RequestMapping("/api/admin")
 public class AdminController {
 
     private final TokenBucketService tokenBucketService;
@@ -18,7 +19,7 @@ public class AdminController {
         this.tokenBucketService = tokenBucketService;
     }
 
-    @GetMapping("/{key}")
+    @GetMapping("/limits/{key}")
     public ResponseEntity<Map<String, Object>> getLimit(@PathVariable String key) {
         BucketConfig config = tokenBucketService.getConfig(key);
         Map<Object, Object> state = tokenBucketService.getBucketState(key);
@@ -32,7 +33,7 @@ public class AdminController {
         return ResponseEntity.ok(result);
     }
 
-    @PutMapping("/{key}")
+    @PutMapping("/limits/{key}")
     public ResponseEntity<Map<String, Object>> setLimit(
             @PathVariable String key,
             @RequestBody LimitRequest body) {
@@ -43,6 +44,16 @@ public class AdminController {
         result.put("capacity", body.capacity());
         result.put("refillRate", body.refillRate());
         result.put("status", "updated");
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/circuit-breaker")
+    public ResponseEntity<Map<String, Object>> getCircuitBreaker() {
+        CircuitBreaker cb = tokenBucketService.getCircuitBreaker();
+        Map<String, Object> result = new HashMap<>();
+        result.put("state", cb.getState().name());
+        result.put("consecutiveFailures", cb.getConsecutiveFailures());
+        result.put("openedAt", cb.getOpenedAt() == 0 ? null : cb.getOpenedAt());
         return ResponseEntity.ok(result);
     }
 
